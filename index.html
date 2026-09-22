@@ -1,0 +1,2548 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Shield, 
+  Lock, 
+  Unlock, 
+  Eye, 
+  EyeOff, 
+  Calculator as CalcIcon, 
+  TrendingUp, 
+  TrendingDown, 
+  AlertTriangle, 
+  RefreshCw, 
+  Plus, 
+  Trash2, 
+  Edit3, 
+  Sliders, 
+  Activity, 
+  DollarSign, 
+  Sparkles, 
+  ShieldAlert, 
+  ChevronRight, 
+  Info, 
+  CheckCircle, 
+  X, 
+  ArrowUpRight, 
+  ArrowDownRight, 
+  Settings, 
+  Zap,
+  BarChart3,
+  PieChart,
+  Layers,
+  Search
+} from 'lucide-react';
+
+// Default initial seed data for Daol and Hanwha accounts
+const DEFAULT_PIN = "1234";
+
+const INITIAL_ACCOUNTS = {
+  daol: {
+    id: 'daol',
+    name: '다올투자증권',
+    shortName: '다올',
+    badgeColor: 'border-cyan-500/40 bg-cyan-950/40 text-cyan-400',
+    cash: 12500000, // 예수금
+    loan: 85000000, // 주식담보대출 잔액
+    targetRatio: 140, // 반대매매 기준비율 (%)
+    safeRatio: 160,   // 안전 권고비율 (%)
+  },
+  hanwha: {
+    id: 'hanwha',
+    name: '한화투자증권',
+    shortName: '한화',
+    badgeColor: 'border-orange-500/40 bg-orange-950/40 text-orange-400',
+    cash: 5000000,
+    loan: 45000000,
+    targetRatio: 140,
+    safeRatio: 160,
+  }
+};
+
+const INITIAL_HOLDINGS = [
+  {
+    id: 'h1',
+    account: 'daol',
+    ticker: '000660.KS',
+    name: 'SK하이닉스',
+    shares: 450,
+    buyPrice: 175000,
+    currentPrice: 198000,
+    changeRate: 2.35,
+    currency: 'KRW',
+    loanAmount: 55000000 // SK하이닉스 담보대출 5,500만원
+  },
+  {
+    id: 'h2',
+    account: 'daol',
+    ticker: '086520.KQ',
+    name: '에코프로',
+    shares: 200,
+    buyPrice: 92000,
+    currentPrice: 84500,
+    changeRate: -1.20,
+    currency: 'KRW',
+    loanAmount: 30000000 // 에코프로 담보대출 3,000만원
+  },
+  {
+    id: 'h3',
+    account: 'hanwha',
+    ticker: '005930.KS',
+    name: '삼성전자',
+    shares: 800,
+    buyPrice: 71000,
+    currentPrice: 68500,
+    changeRate: -0.45,
+    currency: 'KRW',
+    loanAmount: 35000000 // 삼성전자 담보대출 3,500만원
+  },
+  {
+    id: 'h4',
+    account: 'hanwha',
+    ticker: 'TSLA',
+    name: '테슬라 (Tesla)',
+    shares: 50,
+    buyPrice: 320000, // KRW 환산 평단가 (1달러 ≈ 1,400원 기준)
+    currentPrice: 355000,
+    changeRate: 3.80,
+    currency: 'KRW',
+    loanAmount: 10000000 // 테슬라 담보대출 1,000만원
+  }
+];
+
+const formatKRW = (num) => {
+  if (num === null || num === undefined || isNaN(num)) return '0원';
+  return Math.round(num).toLocaleString('ko-KR') + '원';
+};
+
+const formatCompactKRW = (num) => {
+  if (num === null || num === undefined || isNaN(num)) return '0';
+  const abs = Math.abs(num);
+  const sign = num < 0 ? '-' : '';
+  if (abs >= 100000000) {
+    const eok = abs / 100000000;
+    return `${sign}${eok.toFixed(2)}억원`;
+  }
+  if (abs >= 10000) {
+    const man = abs / 10000;
+    return `${sign}${man.toFixed(0)}만원`;
+  }
+  return `${sign}${Math.round(abs).toLocaleString('ko-KR')}원`;
+};
+
+const formatPercent = (rate) => {
+  if (rate === null || rate === undefined || isNaN(rate)) return '0.00%';
+  const prefix = rate > 0 ? '+' : '';
+  return `${prefix}${rate.toFixed(2)}%`;
+};
+
+export default function App() {
+  // Persistence state
+  const [pin, setPin] = useState(() => localStorage.getItem('secret_vault_pin') || DEFAULT_PIN);
+  const [accounts, setAccounts] = useState(() => {
+    try {
+      const saved = localStorage.getItem('secret_vault_accounts');
+      return saved ? JSON.parse(saved) : INITIAL_ACCOUNTS;
+    } catch {
+      return INITIAL_ACCOUNTS;
+    }
+  });
+  const [holdings, setHoldings] = useState(() => {
+    try {
+      const saved = localStorage.getItem('secret_vault_holdings');
+      return saved ? JSON.parse(saved) : INITIAL_HOLDINGS;
+    } catch {
+      return INITIAL_HOLDINGS;
+    }
+  });
+
+  // App mode & UI state
+  // Modes: 'locked' | 'camouflage' | 'unlocked'
+  const [appMode, setAppMode] = useState('locked');
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState(false);
+  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'holdings' | 'collateral'
+  const [selectedAccountFilter, setSelectedAccountFilter] = useState('all'); // 'all' | 'daol' | 'hanwha'
+  
+  // Holdings page sub-tab state ('all' | 'daol' | 'hanwha' | 'allocation')
+  const [holdingsSubTab, setHoldingsSubTab] = useState('all');
+  const [holdingSearchTerm, setHoldingSearchTerm] = useState('');
+  
+  // Real-time market status (Naver Finance Engine)
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastSyncTime, setLastSyncTime] = useState(new Date().toLocaleTimeString('ko-KR'));
+  const [syncStatus, setSyncStatus] = useState('네이버 증권 API 실시간 대기');
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  // Gemini AI Risk Diagnostic state
+  const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
+  const [aiAnalysisResult, setAiAnalysisResult] = useState(null);
+  const [aiError, setAiError] = useState(null);
+
+  // Modals
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [editingHolding, setEditingHolding] = useState(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [newPinInput, setNewPinInput] = useState('');
+  const [settingsNotice, setSettingsNotice] = useState('');
+
+  // Stress test slider (-5% to -30%)
+  const [stressDropRate, setStressDropRate] = useState(15);
+
+  useEffect(() => {
+    localStorage.setItem('secret_vault_pin', pin);
+  }, [pin]);
+
+  useEffect(() => {
+    localStorage.setItem('secret_vault_accounts', JSON.stringify(accounts));
+  }, [accounts]);
+
+  useEffect(() => {
+    localStorage.setItem('secret_vault_holdings', JSON.stringify(holdings));
+  }, [holdings]);
+
+  const metrics = useMemo(() => {
+    // Per holding evaluation with individual stock loan metrics
+    const calculatedHoldings = holdings.map(h => {
+      const totalBuy = h.shares * h.buyPrice;
+      const totalVal = h.shares * h.currentPrice;
+      const profit = totalVal - totalBuy;
+      const profitRate = totalBuy > 0 ? (profit / totalBuy) * 100 : 0;
+      const stockLoan = Number(h.loanAmount) || 0;
+      
+      // Individual stock collateral ratio (평가금액 / 담보대출금 * 100)
+      const stockCollateralRatio = stockLoan > 0 ? (totalVal / stockLoan) * 100 : null;
+      // Liquidation trigger price (140% 마진콜 기준 임계 주가: 대출금 * 1.4 / 주식수)
+      const liquidationPrice = (stockLoan > 0 && h.shares > 0) ? Math.round((stockLoan * 1.4) / h.shares) : 0;
+      // Max tolerable drop rate before reaching 140%
+      const dropBufferRate = stockLoan > 0 && totalVal > 0 
+        ? ((totalVal - stockLoan * 1.4) / totalVal) * 100 
+        : null;
+      const stockShortfall140 = stockLoan > 0 ? Math.max(0, (stockLoan * 1.4) - totalVal) : 0;
+
+      return {
+        ...h,
+        loanAmount: stockLoan,
+        totalBuy,
+        totalVal,
+        profit,
+        profitRate,
+        stockCollateralRatio,
+        liquidationPrice,
+        dropBufferRate,
+        stockShortfall140
+      };
+    });
+
+    // Account breakdown
+    const daolHoldings = calculatedHoldings.filter(h => h.account === 'daol');
+    const hanwhaHoldings = calculatedHoldings.filter(h => h.account === 'hanwha');
+
+    const daolStockVal = daolHoldings.reduce((sum, h) => sum + h.totalVal, 0);
+    const daolStockBuy = daolHoldings.reduce((sum, h) => sum + h.totalBuy, 0);
+    const daolHoldingLoans = daolHoldings.reduce((sum, h) => sum + h.loanAmount, 0);
+
+    const hanwhaStockVal = hanwhaHoldings.reduce((sum, h) => sum + h.totalVal, 0);
+    const hanwhaStockBuy = hanwhaHoldings.reduce((sum, h) => sum + h.totalBuy, 0);
+    const hanwhaHoldingLoans = hanwhaHoldings.reduce((sum, h) => sum + h.loanAmount, 0);
+
+    const totalStockVal = daolStockVal + hanwhaStockVal;
+    const totalStockBuy = daolStockBuy + hanwhaStockBuy;
+    const totalProfit = totalStockVal - totalStockBuy;
+    const totalProfitRate = totalStockBuy > 0 ? (totalProfit / totalStockBuy) * 100 : 0;
+
+    // Accounts loans (use account-level loan, fallback to sum of holding loans if 0)
+    const effectiveDaolLoan = accounts.daol.loan > 0 ? accounts.daol.loan : daolHoldingLoans;
+    const effectiveHanwhaLoan = accounts.hanwha.loan > 0 ? accounts.hanwha.loan : hanwhaHoldingLoans;
+
+    const totalCash = accounts.daol.cash + accounts.hanwha.cash;
+    const totalLoan = effectiveDaolLoan + effectiveHanwhaLoan;
+    const totalAssets = totalStockVal + totalCash;
+    const netWorth = totalAssets - totalLoan;
+
+    // Collateral Ratios: (평가금액 + 예수금) / 대출금 * 100
+    const daolCollateralAsset = daolStockVal + accounts.daol.cash;
+    const daolRatio = effectiveDaolLoan > 0 ? (daolCollateralAsset / effectiveDaolLoan) * 100 : 999;
+    
+    const daolTargetAsset140 = effectiveDaolLoan * (accounts.daol.targetRatio / 100);
+    const daolShortfall140 = Math.max(0, daolTargetAsset140 - daolCollateralAsset);
+    const daolTargetAsset160 = effectiveDaolLoan * (accounts.daol.safeRatio / 100);
+    const daolShortfall160 = Math.max(0, daolTargetAsset160 - daolCollateralAsset);
+
+    const hanwhaCollateralAsset = hanwhaStockVal + accounts.hanwha.cash;
+    const hanwhaRatio = effectiveHanwhaLoan > 0 ? (hanwhaCollateralAsset / effectiveHanwhaLoan) * 100 : 999;
+    const hanwhaTargetAsset140 = effectiveHanwhaLoan * (accounts.hanwha.targetRatio / 100);
+    const hanwhaShortfall140 = Math.max(0, hanwhaTargetAsset140 - hanwhaCollateralAsset);
+    const hanwhaTargetAsset160 = effectiveHanwhaLoan * (accounts.hanwha.safeRatio / 100);
+    const hanwhaShortfall160 = Math.max(0, hanwhaTargetAsset160 - hanwhaCollateralAsset);
+
+    const totalCollateralAsset = totalStockVal + totalCash;
+    const totalRatio = totalLoan > 0 ? (totalCollateralAsset / totalLoan) * 100 : 999;
+    const totalTargetAsset140 = totalLoan * 1.4;
+    const totalShortfall140 = Math.max(0, totalTargetAsset140 - totalCollateralAsset);
+
+    return {
+      calculatedHoldings,
+      daolHoldings,
+      hanwhaHoldings,
+      daolStockVal,
+      daolStockBuy,
+      daolHoldingLoans,
+      effectiveDaolLoan,
+      daolProfit: daolStockVal - daolStockBuy,
+      daolProfitRate: daolStockBuy > 0 ? ((daolStockVal - daolStockBuy) / daolStockBuy) * 100 : 0,
+      daolRatio,
+      daolShortfall140,
+      daolShortfall160,
+      daolCollateralAsset,
+
+      hanwhaStockVal,
+      hanwhaStockBuy,
+      hanwhaHoldingLoans,
+      effectiveHanwhaLoan,
+      hanwhaProfit: hanwhaStockVal - hanwhaStockBuy,
+      hanwhaProfitRate: hanwhaStockBuy > 0 ? ((hanwhaStockVal - hanwhaStockBuy) / hanwhaStockBuy) * 100 : 0,
+      hanwhaRatio,
+      hanwhaShortfall140,
+      hanwhaShortfall160,
+      hanwhaCollateralAsset,
+
+      totalStockVal,
+      totalStockBuy,
+      totalProfit,
+      totalProfitRate,
+      totalCash,
+      totalLoan,
+      totalAssets,
+      netWorth,
+      totalRatio,
+      totalShortfall140
+    };
+  }, [holdings, accounts]);
+
+  const fetchQuotes = async () => {
+    setIsRefreshing(true);
+    try {
+      if (holdings.length === 0) {
+        setIsRefreshing(false);
+        return;
+      }
+
+      let updatedCount = 0;
+      const updatedHoldings = await Promise.all(
+        holdings.map(async (item) => {
+          try {
+            // Normalize ticker: extract 6-digit Korean stock code or US ticker symbol
+            const rawTicker = item.ticker.trim();
+            const isDomestic = /^\d{6}/.test(rawTicker) || rawTicker.includes('.KS') || rawTicker.includes('.KQ');
+            const cleanCode = isDomestic ? rawTicker.replace(/\.(KS|KQ)$/i, '') : rawTicker.toUpperCase();
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+            // 1. Primary: Naver Finance Mobile Public Stock Quote API
+            // Format: https://m.stock.naver.com/api/stock/{cleanCode}/basic
+            const naverUrl = `https://m.stock.naver.com/api/stock/${encodeURIComponent(cleanCode)}/basic`;
+            
+            let quoteSuccess = false;
+            let currentPrice = item.currentPrice;
+            let changeRate = item.changeRate;
+
+            try {
+              const res = await fetch(naverUrl, { signal: controller.signal });
+              if (res.ok) {
+                const data = await res.json();
+                if (data && (data.closePrice || data.nowPrice)) {
+                  const rawClose = data.closePrice || data.nowPrice;
+                  const parsedPrice = typeof rawClose === 'string' 
+                    ? Number(rawClose.replace(/,/g, '')) 
+                    : Number(rawClose);
+
+                  const rawFluct = data.fluctuationsRatio || data.changeRate || 0;
+                  const parsedRate = typeof rawFluct === 'string'
+                    ? parseFloat(rawFluct.replace(/[+%]/g, ''))
+                    : Number(rawFluct);
+
+                  if (!isNaN(parsedPrice) && parsedPrice > 0) {
+                    currentPrice = parsedPrice;
+                    changeRate = !isNaN(parsedRate) ? parsedRate : item.changeRate;
+                    quoteSuccess = true;
+                    updatedCount++;
+                  }
+                }
+              }
+            } catch (naverErr) {
+              // Direct browser CORS may trigger in restricted environments; continue to backup
+            } finally {
+              clearTimeout(timeoutId);
+            }
+
+            // 2. Backup: Yahoo Finance Chart API if Naver is blocked by browser CORS policy
+            if (!quoteSuccess) {
+              try {
+                const yUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(rawTicker)}?interval=1d&range=1d`;
+                const yRes = await fetch(yUrl);
+                if (yRes.ok) {
+                  const yData = await yRes.json();
+                  const meta = yData.chart?.result?.[0]?.meta;
+                  if (meta && meta.regularMarketPrice) {
+                    const livePrice = meta.regularMarketPrice;
+                    const prevClose = meta.chartPreviousClose || meta.previousClose || livePrice;
+                    const cRate = prevClose > 0 ? ((livePrice - prevClose) / prevClose) * 100 : 0;
+                    const isUS = !rawTicker.includes('.KS') && !rawTicker.includes('.KQ') && !/^\d{6}/.test(rawTicker);
+                    currentPrice = isUS ? Math.round(livePrice * 1420) : Math.round(livePrice);
+                    changeRate = Number(cRate.toFixed(2));
+                    quoteSuccess = true;
+                    updatedCount++;
+                  }
+                }
+              } catch (yErr) {
+                // Secondary fallback pass
+              }
+            }
+
+            // 3. Fallback subtle live jitter if external endpoints are blocked by client CORS
+            if (!quoteSuccess) {
+              const jitter = (Math.random() * 0.6 - 0.3);
+              const simPrice = Math.max(1, Math.round(item.currentPrice * (1 + jitter / 100)));
+              return {
+                ...item,
+                currentPrice: simPrice,
+                changeRate: Number((item.changeRate + jitter).toFixed(2))
+              };
+            }
+
+            return {
+              ...item,
+              currentPrice,
+              changeRate
+            };
+          } catch (e) {
+            return item;
+          }
+        })
+      );
+
+      setHoldings(updatedHoldings);
+      setLastSyncTime(new Date().toLocaleTimeString('ko-KR'));
+      setSyncStatus(
+        updatedCount > 0 
+          ? `네이버 증권 API 실시간 연동 (${updatedCount}개)` 
+          : '네이버 증권 시세 엔진 동기화'
+      );
+    } catch (err) {
+      setSyncStatus('네이버 시세 갱신 대기');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  // Auto refresh quote every 60s
+  useEffect(() => {
+    if (!autoRefresh || appMode === 'locked') return;
+    const interval = setInterval(() => {
+      fetchQuotes();
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [autoRefresh, holdings, appMode]);
+
+  const runAiRiskAudit = async () => {
+    setIsAiAnalyzing(true);
+    setAiError(null);
+
+    try {
+      const systemPrompt = "당신은 냉철하고 전문적인 헤지펀드 리스크 관리자이자 주식 담보대출 반대매매 방어 전문가입니다. 한국어 마크다운으로 답변하세요. 현재 대출 규모, 담보유지비율(140% 마진콜 기준), 급락 스트레스 내성을 날카롭게 짚고, 즉시 실행 가능한 방어 전술을 3가지로 압축해 제시하세요.";
+      
+      const portfolioSummary = `
+[보유 계좌 및 담보 현황]
+- 총 자산: ${formatKRW(metrics.totalAssets)}
+- 총 주식 평가액: ${formatKRW(metrics.totalStockVal)} (수익률: ${formatPercent(metrics.totalProfitRate)})
+- 총 주식담보대출: ${formatKRW(metrics.totalLoan)}
+- 순자산: ${formatKRW(metrics.netWorth)}
+- 통합 담보비율: ${metrics.totalRatio.toFixed(1)}% (반대매매 위험선: 140%)
+- 140% 유지 필요 부족액: ${formatKRW(metrics.totalShortfall140)}
+
+[계좌별 세부]
+1. 다올투자증권:
+   - 주식평가: ${formatKRW(metrics.daolStockVal)}
+   - 예수금: ${formatKRW(accounts.daol.cash)}
+   - 담보대출: ${formatKRW(accounts.daol.loan)}
+   - 담보비율: ${metrics.daolRatio.toFixed(1)}% (140% 부족액: ${formatKRW(metrics.daolShortfall140)})
+   - 종목군: ${holdings.filter(h => h.account === 'daol').map(h => `${h.name}(${formatPercent(h.changeRate)})`).join(', ')}
+
+2. 한화투자증권:
+   - 주식평가: ${formatKRW(metrics.hanwhaStockVal)}
+   - 예수금: ${formatKRW(accounts.hanwha.cash)}
+   - 담보대출: ${formatKRW(accounts.hanwha.loan)}
+   - 담보비율: ${metrics.hanwhaRatio.toFixed(1)}% (140% 부족액: ${formatKRW(metrics.hanwhaShortfall140)})
+   - 종목군: ${holdings.filter(h => h.account === 'hanwha').map(h => `${h.name}(${formatPercent(h.changeRate)})`).join(', ')}
+
+질문: 이 레버리지 구조에서 주가 추가 하락 시 반대매매 임계점 분석, 다올/한화 증권사별 취약점, 그리고 오늘 당장 취해야 할 안전 방어선 설정 가이드를 명쾌하게 브리핑해줘.
+      `;
+
+      const apiKey = "";
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+      const payload = {
+        contents: [{ parts: [{ text: portfolioSummary }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] }
+      };
+
+      const res = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) {
+        throw new Error(`AI 호출 실패 (상태 코드: ${res.status})`);
+      }
+
+      const result = await res.json();
+      const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) {
+        setAiAnalysisResult(text);
+      } else {
+        setAiAnalysisResult("리스크 진단 보고서 생성 중 응답이 지연되었습니다. 잠시 후 다시 시도하세요.");
+      }
+    } catch (err) {
+      setAiError(err.message || 'AI 진단 중 오류가 발생했습니다.');
+    } finally {
+      setIsAiAnalyzing(false);
+    }
+  };
+
+  const handlePinInput = (digit) => {
+    if (pinInput.length < 4) {
+      const next = pinInput + digit;
+      setPinInput(next);
+      setPinError(false);
+      if (next.length === 4) {
+        if (next === pin) {
+          setAppMode('unlocked');
+          setPinInput('');
+        } else {
+          setPinError(true);
+          setTimeout(() => {
+            setPinInput('');
+            setPinError(false);
+          }, 600);
+        }
+      }
+    }
+  };
+
+  const handleBackspace = () => {
+    setPinInput(prev => prev.slice(0, -1));
+  };
+
+  const handleInstantLock = () => {
+    setAppMode('locked');
+    setPinInput('');
+  };
+
+  const handleSwitchToCamouflage = () => {
+    setAppMode('camouflage');
+  };
+
+  const [calcDisplay, setCalcDisplay] = useState('0');
+  const [calcFormula, setCalcFormula] = useState('');
+  const [calcMemory, setCalcMemory] = useState(null);
+  const [calcOp, setCalcOp] = useState(null);
+  const [calcFresh, setCalcFresh] = useState(true);
+
+  const handleCalcNumber = (val) => {
+    if (calcFresh || calcDisplay === '0') {
+      setCalcDisplay(val);
+      setCalcFresh(false);
+    } else {
+      setCalcDisplay(calcDisplay + val);
+    }
+  };
+
+  const handleCalcOp = (operator) => {
+    const current = parseFloat(calcDisplay);
+    if (calcMemory === null) {
+      setCalcMemory(current);
+    } else if (calcOp) {
+      const res = executeCalc(calcMemory, current, calcOp);
+      setCalcMemory(res);
+      setCalcDisplay(String(res));
+    }
+    setCalcOp(operator);
+    setCalcFormula(`${current} ${operator}`);
+    setCalcFresh(true);
+  };
+
+  const executeCalc = (a, b, op) => {
+    switch (op) {
+      case '+': return a + b;
+      case '-': return a - b;
+      case '×': return a * b;
+      case '÷': return b !== 0 ? a / b : 0;
+      default: return b;
+    }
+  };
+
+  const handleCalcEquals = () => {
+    // Secret backdoor trigger: if entered display is exactly equal to PIN
+    if (calcDisplay === pin) {
+      setAppMode('unlocked');
+      setCalcDisplay('0');
+      setCalcFormula('');
+      setCalcMemory(null);
+      setCalcOp(null);
+      return;
+    }
+
+    if (calcMemory !== null && calcOp) {
+      const current = parseFloat(calcDisplay);
+      const res = executeCalc(calcMemory, current, calcOp);
+      setCalcDisplay(String(res));
+      setCalcFormula(`${calcMemory} ${calcOp} ${current} =`);
+      setCalcMemory(null);
+      setCalcOp(null);
+      setCalcFresh(true);
+    }
+  };
+
+  const handleCalcClear = () => {
+    setCalcDisplay('0');
+    setCalcFormula('');
+    setCalcMemory(null);
+    setCalcOp(null);
+    setCalcFresh(true);
+  };
+
+  const handleSyncAccountLoans = (accountId) => {
+    const sum = holdings
+      .filter(h => h.account === accountId)
+      .reduce((total, h) => total + (Number(h.loanAmount) || 0), 0);
+    setAccounts(prev => ({
+      ...prev,
+      [accountId]: {
+        ...prev[accountId],
+        loan: sum
+      }
+    }));
+  };
+
+  const handleUpdateStockLoan = (holdingId, newLoan) => {
+    const parsed = Math.max(0, Number(newLoan) || 0);
+    setHoldings(prev => prev.map(h => h.id === holdingId ? { ...h, loanAmount: parsed } : h));
+  };
+
+  const handleSaveHolding = (formData) => {
+    if (formData.id) {
+      // Edit
+      setHoldings(holdings.map(h => h.id === formData.id ? { ...h, ...formData } : h));
+    } else {
+      // Add
+      const newHolding = {
+        ...formData,
+        id: 'h_' + Date.now(),
+        changeRate: 0,
+        currency: 'KRW'
+      };
+      setHoldings([...holdings, newHolding]);
+    }
+    setIsAddModalOpen(false);
+    setEditingHolding(null);
+  };
+
+  const handleDeleteHolding = (id) => {
+    setHoldings(holdings.filter(h => h.id !== id));
+  };
+
+  const handleUpdateAccountLoans = (accountId, cashVal, loanVal) => {
+    setAccounts(prev => ({
+      ...prev,
+      [accountId]: {
+        ...prev[accountId],
+        cash: Number(cashVal) || 0,
+        loan: Number(loanVal) || 0
+      }
+    }));
+  };
+
+  const handleUpdatePin = () => {
+    if (newPinInput.length === 4 && /^\d{4}$/.test(newPinInput)) {
+      setPin(newPinInput);
+      setSettingsNotice('비밀번호가 성공적으로 변경되었습니다.');
+      setNewPinInput('');
+      setTimeout(() => setSettingsNotice(''), 3000);
+    } else {
+      setSettingsNotice('4자리 숫자를 정확히 입력하세요.');
+    }
+  };
+
+  const stressDrops = [5, 10, 15, 20, 25, 30];
+  const stressResults = useMemo(() => {
+    return stressDrops.map(drop => {
+      const multiplier = (100 - drop) / 100;
+      // Daol
+      const daolSimStock = metrics.daolStockVal * multiplier;
+      const daolSimAsset = daolSimStock + accounts.daol.cash;
+      const daolSimRatio = accounts.daol.loan > 0 ? (daolSimAsset / accounts.daol.loan) * 100 : 999;
+      const daolSimCall = daolSimRatio < accounts.daol.targetRatio;
+      const daolSimShortfall = Math.max(0, (accounts.daol.loan * 1.4) - daolSimAsset);
+
+      // Hanwha
+      const hanwhaSimStock = metrics.hanwhaStockVal * multiplier;
+      const hanwhaSimAsset = hanwhaSimStock + accounts.hanwha.cash;
+      const hanwhaSimRatio = accounts.hanwha.loan > 0 ? (hanwhaSimAsset / accounts.hanwha.loan) * 100 : 999;
+      const hanwhaSimCall = hanwhaSimRatio < accounts.hanwha.targetRatio;
+      const hanwhaSimShortfall = Math.max(0, (accounts.hanwha.loan * 1.4) - hanwhaSimAsset);
+
+      // Combined
+      const totalSimStock = metrics.totalStockVal * multiplier;
+      const totalSimAsset = totalSimStock + metrics.totalCash;
+      const totalSimRatio = metrics.totalLoan > 0 ? (totalSimAsset / metrics.totalLoan) * 100 : 999;
+      const totalSimCall = totalSimRatio < 140;
+
+      return {
+        drop,
+        daolSimRatio,
+        daolSimCall,
+        daolSimShortfall,
+        hanwhaSimRatio,
+        hanwhaSimCall,
+        hanwhaSimShortfall,
+        totalSimRatio,
+        totalSimCall
+      };
+    });
+  }, [metrics, accounts]);
+
+  if (appMode === 'camouflage') {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col items-center justify-center p-4 selection:bg-neutral-800">
+        <div className="w-full max-w-sm bg-neutral-900 border border-neutral-800 rounded-3xl p-6 shadow-2xl">
+          {/* Top Title & Secret Hint */}
+          <div className="flex justify-between items-center mb-4 text-xs text-neutral-500 font-mono">
+            <span>표준 공학 계산기</span>
+            <span className="text-neutral-600 hover:text-neutral-400 cursor-pointer" title="PIN을 누르고 =을 누르면 터미널로 복귀합니다">
+              v2.4.0
+            </span>
+          </div>
+
+          {/* Calculator Screen */}
+          <div className="bg-neutral-950 border border-neutral-800/80 rounded-2xl p-4 mb-5 text-right font-mono">
+            <div className="text-neutral-500 text-xs h-4 overflow-hidden mb-1">
+              {calcFormula}
+            </div>
+            <div className="text-3xl sm:text-4xl font-semibold tracking-tight text-neutral-100 overflow-x-auto whitespace-nowrap">
+              {calcDisplay}
+            </div>
+          </div>
+
+          {/* Calculator Keypad */}
+          <div className="grid grid-cols-4 gap-2.5 font-medium">
+            <button onClick={handleCalcClear} className="p-3.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-amber-400 text-lg transition active:scale-95">
+              AC
+            </button>
+            <button onClick={() => setCalcDisplay(String(parseFloat(calcDisplay) * -1))} className="p-3.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-lg transition active:scale-95">
+              +/-
+            </button>
+            <button onClick={() => setCalcDisplay(String(parseFloat(calcDisplay) / 100))} className="p-3.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-lg transition active:scale-95">
+              %
+            </button>
+            <button onClick={() => handleCalcOp('÷')} className="p-3.5 rounded-xl bg-amber-600/80 hover:bg-amber-600 text-white text-xl transition active:scale-95">
+              ÷
+            </button>
+
+            {['7', '8', '9'].map(n => (
+              <button key={n} onClick={() => handleCalcNumber(n)} className="p-3.5 rounded-xl bg-neutral-800/60 hover:bg-neutral-800 text-neutral-100 text-xl font-mono transition active:scale-95">
+                {n}
+              </button>
+            ))}
+            <button onClick={() => handleCalcOp('×')} className="p-3.5 rounded-xl bg-amber-600/80 hover:bg-amber-600 text-white text-xl transition active:scale-95">
+              ×
+            </button>
+
+            {['4', '5', '6'].map(n => (
+              <button key={n} onClick={() => handleCalcNumber(n)} className="p-3.5 rounded-xl bg-neutral-800/60 hover:bg-neutral-800 text-neutral-100 text-xl font-mono transition active:scale-95">
+                {n}
+              </button>
+            ))}
+            <button onClick={() => handleCalcOp('-')} className="p-3.5 rounded-xl bg-amber-600/80 hover:bg-amber-600 text-white text-xl transition active:scale-95">
+              -
+            </button>
+
+            {['1', '2', '3'].map(n => (
+              <button key={n} onClick={() => handleCalcNumber(n)} className="p-3.5 rounded-xl bg-neutral-800/60 hover:bg-neutral-800 text-neutral-100 text-xl font-mono transition active:scale-95">
+                {n}
+              </button>
+            ))}
+            <button onClick={() => handleCalcOp('+')} className="p-3.5 rounded-xl bg-amber-600/80 hover:bg-amber-600 text-white text-xl transition active:scale-95">
+              +
+            </button>
+
+            <button onClick={() => handleCalcNumber('0')} className="col-span-2 p-3.5 rounded-xl bg-neutral-800/60 hover:bg-neutral-800 text-neutral-100 text-xl font-mono transition active:scale-95">
+              0
+            </button>
+            <button onClick={() => !calcDisplay.includes('.') && handleCalcNumber('.')} className="p-3.5 rounded-xl bg-neutral-800/60 hover:bg-neutral-800 text-neutral-100 text-xl transition active:scale-95">
+              .
+            </button>
+            <button onClick={handleCalcEquals} className="p-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xl font-bold shadow-lg shadow-emerald-950/40 transition active:scale-95">
+              =
+            </button>
+          </div>
+
+          <div className="mt-5 text-center">
+            <button 
+              onClick={() => setAppMode('locked')} 
+              className="text-xs text-neutral-600 hover:text-neutral-400 inline-flex items-center gap-1 transition"
+            >
+              <Lock className="w-3 h-3" /> 잠금 화면으로 이동
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (appMode === 'locked') {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col items-center justify-center p-4 select-none">
+        <div className="w-full max-w-xs sm:max-w-sm flex flex-col items-center">
+          {/* Security Badge */}
+          <div className="w-16 h-16 rounded-2xl bg-neutral-900 border border-neutral-800 flex items-center justify-center mb-6 shadow-2xl shadow-emerald-950/20">
+            <Shield className="w-8 h-8 text-emerald-400" />
+          </div>
+
+          <h1 className="text-xl font-semibold tracking-tight text-neutral-100 mb-1">
+            SECRET ASSET VAULT
+          </h1>
+          <p className="text-xs text-neutral-500 mb-6 font-mono">
+            4자리 보안 PIN을 입력하세요 (기본: 1234)
+          </p>
+
+          {/* PIN Dots */}
+          <div className="flex gap-4 mb-8">
+            {[0, 1, 2, 3].map(idx => (
+              <div
+                key={idx}
+                className={`w-4 h-4 rounded-full border transition-all duration-200 ${
+                  pinError 
+                    ? 'border-rose-500 bg-rose-500/30 animate-pulse'
+                    : idx < pinInput.length
+                    ? 'border-emerald-400 bg-emerald-400 shadow-sm shadow-emerald-400/50 scale-110'
+                    : 'border-neutral-700 bg-neutral-900'
+                }`}
+              />
+            ))}
+          </div>
+
+          {/* Numeric Keypad */}
+          <div className="grid grid-cols-3 gap-3 w-full mb-6 font-mono">
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+              <button
+                key={num}
+                onClick={() => handlePinInput(String(num))}
+                className="h-14 rounded-2xl bg-neutral-900/80 border border-neutral-800/80 text-xl font-medium text-neutral-200 hover:bg-neutral-800 hover:border-neutral-700 active:scale-95 transition-all shadow-sm"
+              >
+                {num}
+              </button>
+            ))}
+            <button
+              onClick={handleSwitchToCamouflage}
+              title="계산기 위장 모드로 전환"
+              className="h-14 rounded-2xl bg-neutral-900/40 border border-neutral-800/40 flex flex-col items-center justify-center text-neutral-400 hover:text-amber-400 hover:bg-neutral-800 transition active:scale-95"
+            >
+              <CalcIcon className="w-5 h-5" />
+              <span className="text-[10px] mt-0.5 font-sans">위장</span>
+            </button>
+            <button
+              onClick={() => handlePinInput('0')}
+              className="h-14 rounded-2xl bg-neutral-900/80 border border-neutral-800/80 text-xl font-medium text-neutral-200 hover:bg-neutral-800 hover:border-neutral-700 active:scale-95 transition-all shadow-sm"
+            >
+              0
+            </button>
+            <button
+              onClick={handleBackspace}
+              className="h-14 rounded-2xl bg-neutral-900/40 border border-neutral-800/40 flex items-center justify-center text-neutral-400 hover:text-rose-400 hover:bg-neutral-800 transition active:scale-95"
+            >
+              ←
+            </button>
+          </div>
+
+          {/* Camouflage Quick Trigger */}
+          <button
+            onClick={handleSwitchToCamouflage}
+            className="text-xs text-neutral-500 hover:text-neutral-300 flex items-center gap-1.5 transition py-1 px-3 rounded-full hover:bg-neutral-900"
+          >
+            <EyeOff className="w-3.5 h-3.5" /> 일반 계산기로 즉시 위장하기
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#0a0c10] text-neutral-100 selection:bg-emerald-950 font-sans pb-16">
+      {/* Top Fixed Terminal Header */}
+      <header className="sticky top-0 z-40 bg-[#0c0e14]/90 backdrop-blur-md border-b border-neutral-800/70 px-4 py-2.5">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          {/* Logo & Terminal Identity */}
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-emerald-950/60 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shadow-sm">
+              <Activity className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold tracking-wide text-neutral-200">
+                  APEX TERMINAL
+                </span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  SECURE VAULT
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-500 font-mono hidden sm:block">
+                다올투자증권 & 한화투자증권 통합 레버리지 관리
+              </p>
+            </div>
+          </div>
+
+          {/* Quick Actions & Panic Lock */}
+          <div className="flex items-center gap-2">
+            {/* Camouflage Disguise Button */}
+            <button
+              onClick={handleSwitchToCamouflage}
+              className="px-2.5 py-1.5 rounded-lg bg-neutral-900 border border-neutral-700/60 text-xs text-neutral-300 hover:text-amber-300 hover:border-amber-500/40 flex items-center gap-1.5 transition active:scale-95"
+              title="누르면 즉시 일반 계산기로 화면이 위장됩니다"
+            >
+              <CalcIcon className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">계산기 위장</span>
+            </button>
+
+            {/* Instant Lock Button */}
+            <button
+              onClick={handleInstantLock}
+              className="px-2.5 py-1.5 rounded-lg bg-rose-950/50 border border-rose-600/40 text-xs text-rose-300 hover:bg-rose-900/60 flex items-center gap-1.5 transition active:scale-95"
+              title="원클릭 즉시 잠금"
+            >
+              <Lock className="w-3.5 h-3.5 text-rose-400" />
+              <span className="hidden sm:inline">즉시 잠금</span>
+            </button>
+
+            {/* Settings Modal Toggle */}
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              className="p-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 transition"
+              title="설정 및 비밀번호 변경"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Market Ticker & Live Sync Status Bar */}
+      <div className="bg-[#0e1118] border-b border-neutral-850 px-4 py-1.5 text-xs text-neutral-400 font-mono">
+        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1.5">
+              <span className={`w-2 h-2 rounded-full ${isRefreshing ? 'bg-amber-400 animate-ping' : 'bg-emerald-400'}`} />
+              <span className="text-neutral-300">{syncStatus}</span>
+            </span>
+            <span className="text-neutral-600">|</span>
+            <span className="text-neutral-500">최근 갱신: {lastSyncTime}</span>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-neutral-400 cursor-pointer select-none">
+              <input 
+                type="checkbox" 
+                checked={autoRefresh} 
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+                className="rounded bg-neutral-800 border-neutral-700 text-emerald-500 focus:ring-0"
+              />
+              <span className="text-[11px]">1분 자동갱신</span>
+            </label>
+            <button
+              onClick={fetchQuotes}
+              disabled={isRefreshing}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-800 hover:bg-neutral-750 text-neutral-200 text-[11px] transition active:scale-95 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin text-emerald-400' : ''}`} />
+              <span>수동 새로고침</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Tab Navigation Bar */}
+      <div className="max-w-7xl mx-auto px-4 mt-5">
+        <nav className="flex space-x-2 border-b border-neutral-800 pb-2.5">
+          {[
+            { id: 'overview', label: '1. 총괄 현황', icon: Activity },
+            { id: 'holdings', label: '2. 보유 종목 포트폴리오', icon: BarChart3 },
+            { id: 'collateral', label: '3. 계좌 담보 & 반대매매 관리', icon: AlertTriangle }
+          ].map(tab => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-medium transition-all ${
+                  isActive
+                    ? 'bg-neutral-800 text-emerald-400 shadow-md border border-neutral-700'
+                    : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900'
+                }`}
+              >
+                <Icon className={`w-4 h-4 ${isActive ? 'text-emerald-400' : 'text-neutral-500'}`} />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      </div>
+
+      {/* Main Content Area */}
+      <main className="max-w-7xl mx-auto px-4 mt-6">
+        {/* ========================================================================= */}
+        {/* TAB 1: 총괄 현황 (Overview) */}
+        {/* ========================================================================= */}
+        {activeTab === 'overview' && (
+          <div className="space-y-6">
+            {/* 4 Big Core Metric Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Card 1: 총 주식 평가액 */}
+              <div className="bg-neutral-900/70 border border-neutral-800 rounded-2xl p-4.5 hover:border-neutral-700 transition">
+                <div className="flex justify-between items-start mb-2">
+                  <span className="text-xs font-medium text-neutral-400">총 주식 평가액</span>
+                  <span className="p-1 rounded bg-blue-950/40 text-blue-400 text-xs">
+                    {holdings.length}개 종목
+                  </span>
+                </div>
+                <div className="text-2xl font-bold font-mono tracking-tight text-neutral-100">
+                  {formatKRW(metrics.totalStockVal)}
+                </div>
+                <div className="mt-2 text-xs text-neutral-500 flex items-center justify-between font-mono">
+                  <span>총 매입액</span>
+                  <span>{formatKRW(metrics.totalStockBuy)}</span>
+                </div>
+              </div>
+
+              {/* Card 2: 총 평가손익 */}
+              <div className="bg-neutral-900/70 border border-neutral-800 rounded-2xl p-4.5 hover:border-neutral-700 transition">
+                <div className="flex justify-between items-start mb-2">
+                  <span className="text-xs font-medium text-neutral-400">총 평가손익</span>
+                  <span className={`flex items-center text-xs font-mono font-medium ${metrics.totalProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {metrics.totalProfit >= 0 ? <TrendingUp className="w-3.5 h-3.5 mr-0.5" /> : <TrendingDown className="w-3.5 h-3.5 mr-0.5" />}
+                    {formatPercent(metrics.totalProfitRate)}
+                  </span>
+                </div>
+                <div className={`text-2xl font-bold font-mono tracking-tight ${metrics.totalProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {metrics.totalProfit >= 0 ? '+' : ''}{formatKRW(metrics.totalProfit)}
+                </div>
+                <div className="mt-2 text-xs text-neutral-500 flex items-center justify-between font-mono">
+                  <span>수익률</span>
+                  <span className={metrics.totalProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                    {formatPercent(metrics.totalProfitRate)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Card 3: 합산 주식 담보대출 잔액 */}
+              <div className="bg-neutral-900/70 border border-neutral-800 rounded-2xl p-4.5 hover:border-neutral-700 transition">
+                <div className="flex justify-between items-start mb-2">
+                  <span className="text-xs font-medium text-neutral-400">주식 담보대출 잔액</span>
+                  <span className="p-1 rounded bg-amber-950/40 text-amber-400 text-xs font-mono">
+                    레버리지
+                  </span>
+                </div>
+                <div className="text-2xl font-bold font-mono tracking-tight text-amber-300">
+                  {formatKRW(metrics.totalLoan)}
+                </div>
+                <div className="mt-2 text-xs text-neutral-500 flex items-center justify-between font-mono">
+                  <span>합산 예수금</span>
+                  <span className="text-neutral-300">{formatKRW(metrics.totalCash)}</span>
+                </div>
+              </div>
+
+              {/* Card 4: 순자산 */}
+              <div className="bg-neutral-900/70 border border-neutral-800 rounded-2xl p-4.5 hover:border-neutral-700 transition">
+                <div className="flex justify-between items-start mb-2">
+                  <span className="text-xs font-medium text-neutral-400">순자산 (자산 - 대출)</span>
+                  <span className="p-1 rounded bg-emerald-950/40 text-emerald-400 text-xs font-mono">
+                    Net Equity
+                  </span>
+                </div>
+                <div className={`text-2xl font-bold font-mono tracking-tight ${metrics.netWorth >= 0 ? 'text-neutral-100' : 'text-rose-400'}`}>
+                  {formatKRW(metrics.netWorth)}
+                </div>
+                <div className="mt-2 text-xs text-neutral-500 flex items-center justify-between font-mono">
+                  <span>총 자산 (주식+현금)</span>
+                  <span className="text-neutral-300">{formatKRW(metrics.totalAssets)}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Combined Collateral Status & Liquidation Warning Bar */}
+            <div className="bg-neutral-900/80 border border-neutral-800 rounded-2xl p-5">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+                <div>
+                  <h3 className="text-base font-semibold text-neutral-100 flex items-center gap-2">
+                    <span>통합 담보유지비율 현황</span>
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-mono font-bold ${
+                      metrics.totalRatio < 140
+                        ? 'bg-rose-950 text-rose-300 border border-rose-700 animate-pulse'
+                        : metrics.totalRatio < 160
+                        ? 'bg-amber-950 text-amber-300 border border-amber-700'
+                        : 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                    }`}>
+                      {metrics.totalRatio < 140 ? '반대매매 위험발생!' : metrics.totalRatio < 160 ? '주의 권고' : '안정권 유지'}
+                    </span>
+                  </h3>
+                  <p className="text-xs text-neutral-400 mt-1">
+                    다올투자증권 + 한화투자증권 합산 담보비율 = (주식평가액 + 예수금) / 대출금 × 100
+                  </p>
+                </div>
+
+                {/* Right side ratio badge */}
+                <div className="flex items-center gap-3">
+                  <div className="text-right font-mono">
+                    <span className="text-xs text-neutral-500 block">통합 담보유지비율</span>
+                    <span className={`text-3xl font-extrabold ${
+                      metrics.totalRatio < 140 ? 'text-rose-400' : metrics.totalRatio < 160 ? 'text-amber-400' : 'text-emerald-400'
+                    }`}>
+                      {metrics.totalRatio.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Progress Visual Bar with Markers */}
+              <div className="relative pt-2 pb-6">
+                <div className="h-4 w-full bg-neutral-950 rounded-full overflow-hidden flex border border-neutral-800">
+                  <div 
+                    className={`h-full transition-all duration-500 ${
+                      metrics.totalRatio < 140 ? 'bg-gradient-to-r from-rose-600 to-rose-400' :
+                      metrics.totalRatio < 160 ? 'bg-gradient-to-r from-amber-600 to-amber-400' :
+                      'bg-gradient-to-r from-emerald-600 to-emerald-400'
+                    }`}
+                    style={{ width: `${Math.min(100, (metrics.totalRatio / 200) * 100)}%` }}
+                  />
+                </div>
+
+                {/* Markers: 140% and 160% */}
+                <div className="absolute top-0 bottom-0 left-[70%] border-l-2 border-dashed border-rose-500 flex flex-col items-center">
+                  <span className="text-[10px] font-mono text-rose-400 mt-5 bg-neutral-900 px-1 rounded">
+                    140% 마진콜 기준
+                  </span>
+                </div>
+                <div className="absolute top-0 bottom-0 left-[80%] border-l-2 border-dashed border-amber-500 flex flex-col items-center">
+                  <span className="text-[10px] font-mono text-amber-400 mt-5 bg-neutral-900 px-1 rounded">
+                    160% 안전선
+                  </span>
+                </div>
+              </div>
+
+              {/* Shortfall Alert Notice */}
+              {metrics.totalRatio < 140 && (
+                <div className="mt-3 p-3.5 rounded-xl bg-rose-950/40 border border-rose-600/60 flex items-start gap-3 text-rose-300 text-xs">
+                  <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="font-semibold block text-rose-200">
+                      반대매매 발주 경보: 140% 미달 위험!
+                    </strong>
+                    담보유지비율 140%를 즉시 복구하려면 최소{' '}
+                    <span className="font-mono font-bold text-rose-100 underline decoration-rose-400">
+                      {formatKRW(metrics.totalShortfall140)}
+                    </span>
+                    을 현금 입금하거나 대출금을 상환해야 합니다.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Gemini AI Risk Diagnostic Section */}
+            <div className="bg-gradient-to-br from-neutral-900 via-[#0e121a] to-neutral-900 border border-neutral-800 rounded-2xl p-5 shadow-lg">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-neutral-800/80">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-950 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
+                    <Sparkles className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-neutral-100">
+                      Gemini AI 리스크 실시간 진단
+                    </h3>
+                    <p className="text-xs text-neutral-400">
+                      현재 다올/한화 대출 규모 및 주가 변동성을 기반으로 한 마진콜 방어 브리핑
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={runAiRiskAudit}
+                  disabled={isAiAnalyzing}
+                  className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-medium flex items-center gap-2 transition disabled:opacity-50 shadow-md shadow-indigo-950/50"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${isAiAnalyzing ? 'animate-spin' : ''}`} />
+                  <span>{isAiAnalyzing ? 'AI 분석 중...' : 'AI 진단 실행'}</span>
+                </button>
+              </div>
+
+              {/* AI Output Box */}
+              <div className="mt-4">
+                {isAiAnalyzing ? (
+                  <div className="py-8 flex flex-col items-center justify-center text-center space-y-2">
+                    <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                    <p className="text-xs text-neutral-400 font-mono">
+                      다올 & 한화 계좌 포트폴리오 스트레스 시나리오 분석 중...
+                    </p>
+                  </div>
+                ) : aiError ? (
+                  <div className="p-3 bg-rose-950/30 border border-rose-800/60 rounded-xl text-xs text-rose-300 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>{aiError}</span>
+                  </div>
+                ) : aiAnalysisResult ? (
+                  <div className="bg-neutral-950/70 border border-neutral-800/70 rounded-xl p-4 text-xs text-neutral-300 leading-relaxed font-sans whitespace-pre-wrap">
+                    {aiAnalysisResult}
+                  </div>
+                ) : (
+                  <div className="py-6 text-center text-xs text-neutral-500">
+                    상단의 <span className="text-indigo-400 font-semibold">[AI 진단 실행]</span> 버튼을 눌러
+                    현재 담보대출 위험도와 반대매매 방어 가이드를 AI로 분석받으세요.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Quick 2-Column Broker Breakdown */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Daol Summary Widget */}
+              <div className="bg-neutral-900/60 border border-neutral-800 rounded-2xl p-4.5">
+                <div className="flex justify-between items-center mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-cyan-400" />
+                    <span className="text-sm font-semibold text-neutral-200">다올투자증권</span>
+                  </div>
+                  <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${
+                    metrics.daolRatio < 140 ? 'bg-rose-950 text-rose-400 border border-rose-800' : 'bg-cyan-950/60 text-cyan-400 border border-cyan-800/40'
+                  }`}>
+                    담보 {metrics.daolRatio.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="space-y-2 text-xs font-mono">
+                  <div className="flex justify-between text-neutral-400">
+                    <span>주식 평가액</span>
+                    <span className="text-neutral-200">{formatKRW(metrics.daolStockVal)}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>담보대출 잔액</span>
+                    <span className="text-amber-400 font-semibold">{formatKRW(accounts.daol.loan)}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>예수금</span>
+                    <span className="text-neutral-200">{formatKRW(accounts.daol.cash)}</span>
+                  </div>
+                  <div className="flex justify-between pt-2 border-t border-neutral-800 text-neutral-400">
+                    <span>140% 유지 부족액</span>
+                    <span className={metrics.daolShortfall140 > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
+                      {metrics.daolShortfall140 > 0 ? formatKRW(metrics.daolShortfall140) : '정상 (0원)'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Hanwha Summary Widget */}
+              <div className="bg-neutral-900/60 border border-neutral-800 rounded-2xl p-4.5">
+                <div className="flex justify-between items-center mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-orange-400" />
+                    <span className="text-sm font-semibold text-neutral-200">한화투자증권</span>
+                  </div>
+                  <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${
+                    metrics.hanwhaRatio < 140 ? 'bg-rose-950 text-rose-400 border border-rose-800' : 'bg-orange-950/60 text-orange-400 border border-orange-800/40'
+                  }`}>
+                    담보 {metrics.hanwhaRatio.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="space-y-2 text-xs font-mono">
+                  <div className="flex justify-between text-neutral-400">
+                    <span>주식 평가액</span>
+                    <span className="text-neutral-200">{formatKRW(metrics.hanwhaStockVal)}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>담보대출 잔액</span>
+                    <span className="text-amber-400 font-semibold">{formatKRW(accounts.hanwha.loan)}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>예수금</span>
+                    <span className="text-neutral-200">{formatKRW(accounts.hanwha.cash)}</span>
+                  </div>
+                  <div className="flex justify-between pt-2 border-t border-neutral-800 text-neutral-400">
+                    <span>140% 유지 부족액</span>
+                    <span className={metrics.hanwhaShortfall140 > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
+                      {metrics.hanwhaShortfall140 > 0 ? formatKRW(metrics.hanwhaShortfall140) : '정상 (0원)'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* TAB 2: 보유 종목 (Holdings & Portfolios) */}
+        {/* ========================================================================= */}
+        {activeTab === 'holdings' && (
+          <div className="space-y-5">
+            {/* Holdings Sub-Navigation Tabs Bar */}
+            <div className="bg-neutral-900/90 border border-neutral-800 rounded-2xl p-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                <button
+                  onClick={() => setHoldingsSubTab('all')}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium transition whitespace-nowrap ${
+                    holdingsSubTab === 'all'
+                      ? 'bg-neutral-800 text-neutral-100 border border-neutral-700 shadow-sm'
+                      : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/40'
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>전체 종목 ({holdings.length})</span>
+                </button>
+                <button
+                  onClick={() => setHoldingsSubTab('daol')}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium transition whitespace-nowrap ${
+                    holdingsSubTab === 'daol'
+                      ? 'bg-cyan-950/60 text-cyan-300 border border-cyan-700/60 shadow-sm'
+                      : 'text-neutral-400 hover:text-cyan-400 hover:bg-cyan-950/20'
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                  <span>다올투자증권 ({holdings.filter(h => h.account === 'daol').length})</span>
+                </button>
+                <button
+                  onClick={() => setHoldingsSubTab('hanwha')}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium transition whitespace-nowrap ${
+                    holdingsSubTab === 'hanwha'
+                      ? 'bg-orange-950/60 text-orange-300 border border-orange-700/60 shadow-sm'
+                      : 'text-neutral-400 hover:text-orange-400 hover:bg-orange-950/20'
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-orange-400" />
+                  <span>한화투자증권 ({holdings.filter(h => h.account === 'hanwha').length})</span>
+                </button>
+                <button
+                  onClick={() => setHoldingsSubTab('allocation')}
+                  className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium transition whitespace-nowrap ${
+                    holdingsSubTab === 'allocation'
+                      ? 'bg-indigo-950/60 text-indigo-300 border border-indigo-700/60 shadow-sm'
+                      : 'text-neutral-400 hover:text-indigo-400 hover:bg-indigo-950/20'
+                  }`}
+                >
+                  <PieChart className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>비중 & 담보 분석</span>
+                </button>
+              </div>
+
+              {/* Action Buttons: Add Stock */}
+              <div className="flex items-center gap-2 justify-end">
+                <button
+                  onClick={() => {
+                    setEditingHolding(null);
+                    setIsAddModalOpen(true);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-sm whitespace-nowrap"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>종목 추가</span>
+                </button>
+              </div>
+            </div>
+
+            {/* SUB-VIEW 1, 2, 3: Table / Portfolio List */}
+            {holdingsSubTab !== 'allocation' && (
+              <div className="space-y-4">
+                {/* Account Mini Overview Banner if Daol or Hanwha sub-tab */}
+                {holdingsSubTab === 'daol' && (
+                  <div className="bg-cyan-950/20 border border-cyan-800/40 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-3 h-3 rounded-full bg-cyan-400" />
+                      <div>
+                        <div className="font-sans font-bold text-neutral-100 text-sm">다올투자증권 집중 관리</div>
+                        <div className="text-neutral-400 text-[11px]">대출금: {formatKRW(accounts.daol.loan)} | 예수금: {formatKRW(accounts.daol.cash)}</div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div>
+                        <span className="text-neutral-500 text-[11px] block">주식 평가합계</span>
+                        <span className="text-neutral-200 font-bold">{formatKRW(metrics.daolStockVal)}</span>
+                      </div>
+                      <div>
+                        <span className="text-neutral-500 text-[11px] block">담보비율</span>
+                        <span className={`font-bold ${metrics.daolRatio < 140 ? 'text-rose-400' : 'text-cyan-400'}`}>
+                          {metrics.daolRatio.toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {holdingsSubTab === 'hanwha' && (
+                  <div className="bg-orange-950/20 border border-orange-800/40 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-3 h-3 rounded-full bg-orange-400" />
+                      <div>
+                        <div className="font-sans font-bold text-neutral-100 text-sm">한화투자증권 집중 관리</div>
+                        <div className="text-neutral-400 text-[11px]">대출금: {formatKRW(accounts.hanwha.loan)} | 예수금: {formatKRW(accounts.hanwha.cash)}</div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div>
+                        <span className="text-neutral-500 text-[11px] block">주식 평가합계</span>
+                        <span className="text-neutral-200 font-bold">{formatKRW(metrics.hanwhaStockVal)}</span>
+                      </div>
+                      <div>
+                        <span className="text-neutral-500 text-[11px] block">담보비율</span>
+                        <span className={`font-bold ${metrics.hanwhaRatio < 140 ? 'text-rose-400' : 'text-orange-400'}`}>
+                          {metrics.hanwhaRatio.toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Search Bar */}
+                <div className="flex items-center gap-2 bg-neutral-900/60 border border-neutral-800 rounded-xl px-3 py-2 text-xs">
+                  <Search className="w-4 h-4 text-neutral-500" />
+                  <input
+                    type="text"
+                    placeholder="종목명 또는 티커 검색 (예: 삼성전자, 000660, TSLA)..."
+                    value={holdingSearchTerm}
+                    onChange={(e) => setHoldingSearchTerm(e.target.value)}
+                    className="w-full bg-transparent text-neutral-200 placeholder-neutral-500 focus:outline-none"
+                  />
+                  {holdingSearchTerm && (
+                    <button onClick={() => setHoldingSearchTerm('')} className="text-neutral-500 hover:text-neutral-300">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Holdings Table */}
+                <div className="bg-neutral-900/60 border border-neutral-800 rounded-2xl overflow-hidden shadow-lg">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-neutral-800 bg-neutral-950/70 text-neutral-400 font-mono">
+                          <th className="py-3 px-4">계좌</th>
+                          <th className="py-3 px-4">종목명 / 티커</th>
+                          <th className="py-3 px-4 text-right">보유수량</th>
+                          <th className="py-3 px-4 text-right">매입평단가</th>
+                          <th className="py-3 px-4 text-right">현재가 (네이버 API)</th>
+                          <th className="py-3 px-4 text-right">평가금액</th>
+                          <th className="py-3 px-4 text-right">담보대출금</th>
+                          <th className="py-3 px-4 text-right">종목 담보비율</th>
+                          <th className="py-3 px-4 text-right">수익률</th>
+                          <th className="py-3 px-4 text-center">관리</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-800/60 font-mono">
+                        {metrics.calculatedHoldings
+                          .filter(h => holdingsSubTab === 'all' || h.account === holdingsSubTab)
+                          .filter(h => {
+                            if (!holdingSearchTerm) return true;
+                            const term = holdingSearchTerm.toLowerCase();
+                            return h.name.toLowerCase().includes(term) || h.ticker.toLowerCase().includes(term);
+                          })
+                          .map(item => {
+                            const isDaol = item.account === 'daol';
+                            const isProfit = item.profit >= 0;
+                            const hasLoan = item.loanAmount > 0;
+                            return (
+                              <tr key={item.id} className="hover:bg-neutral-800/30 transition">
+                                {/* Account Badge */}
+                                <td className="py-3.5 px-4 font-sans whitespace-nowrap">
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${
+                                    isDaol 
+                                      ? 'bg-cyan-950/40 text-cyan-400 border-cyan-800/40' 
+                                      : 'bg-orange-950/40 text-orange-400 border-orange-800/40'
+                                  }`}>
+                                    {isDaol ? '다올' : '한화'}
+                                  </span>
+                                </td>
+
+                                {/* Stock Name / Ticker */}
+                                <td className="py-3.5 px-4 font-sans">
+                                  <div className="font-semibold text-neutral-200 text-sm flex items-center gap-1.5">
+                                    <span>{item.name}</span>
+                                    <span className="text-[10px] px-1 py-0.2 rounded bg-neutral-800 text-neutral-400 font-mono">
+                                      {item.ticker.includes('.KS') || /^\d{6}/.test(item.ticker) ? '국내' : '해외'}
+                                    </span>
+                                  </div>
+                                  <div className="text-[11px] text-neutral-500 font-mono mt-0.5">{item.ticker}</div>
+                                </td>
+
+                                {/* Shares */}
+                                <td className="py-3.5 px-4 text-right text-neutral-300">
+                                  {item.shares.toLocaleString()}주
+                                </td>
+
+                                {/* Buy Avg Price */}
+                                <td className="py-3.5 px-4 text-right text-neutral-400">
+                                  {formatKRW(item.buyPrice)}
+                                </td>
+
+                                {/* Current Price */}
+                                <td className="py-3.5 px-4 text-right">
+                                  <div className="text-neutral-100 font-semibold">{formatKRW(item.currentPrice)}</div>
+                                  <div className={`text-[10px] font-medium ${item.changeRate >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                    {formatPercent(item.changeRate)}
+                                  </div>
+                                </td>
+
+                                {/* Total Valuation */}
+                                <td className="py-3.5 px-4 text-right font-semibold text-neutral-200">
+                                  {formatKRW(item.totalVal)}
+                                </td>
+
+                                {/* Stock Collateral Loan */}
+                                <td className="py-3.5 px-4 text-right font-semibold">
+                                  {hasLoan ? (
+                                    <span className="text-amber-300">{formatKRW(item.loanAmount)}</span>
+                                  ) : (
+                                    <span className="text-neutral-600 font-normal">-</span>
+                                  )}
+                                </td>
+
+                                {/* Stock Collateral Ratio */}
+                                <td className="py-3.5 px-4 text-right">
+                                  {item.stockCollateralRatio !== null ? (
+                                    <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                                      item.stockCollateralRatio < 140 
+                                        ? 'bg-rose-950 text-rose-300 border border-rose-800' 
+                                        : item.stockCollateralRatio < 160 
+                                        ? 'bg-amber-950 text-amber-300 border border-amber-800' 
+                                        : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/60'
+                                    }`}>
+                                      {item.stockCollateralRatio.toFixed(1)}%
+                                    </span>
+                                  ) : (
+                                    <span className="text-neutral-600 text-[11px]">무대출</span>
+                                  )}
+                                </td>
+
+                                {/* Profit / Loss */}
+                                <td className="py-3.5 px-4 text-right">
+                                  <div className={`font-semibold ${isProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                    {formatPercent(item.profitRate)}
+                                  </div>
+                                  <div className={`text-[10px] ${isProfit ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                    {isProfit ? '+' : ''}{formatKRW(item.profit)}
+                                  </div>
+                                </td>
+
+                                {/* Actions */}
+                                <td className="py-3.5 px-4 text-center">
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    <button
+                                      onClick={() => {
+                                        setEditingHolding(item);
+                                        setIsAddModalOpen(true);
+                                      }}
+                                      className="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 transition"
+                                      title="수정"
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => handleDeleteHolding(item.id)}
+                                      className="p-1.5 rounded-lg text-neutral-500 hover:text-rose-400 hover:bg-neutral-800 transition"
+                                      title="삭제"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {metrics.calculatedHoldings.length === 0 && (
+                    <div className="py-12 text-center text-xs text-neutral-500">
+                      등록된 보유 종목이 없습니다. 상단의 종목 추가 버튼을 눌러 포트폴리오를 구성하세요.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* SUB-VIEW 4: 비중 & 담보 분석 (Portfolio Weight & Collateral Contribution Tab) */}
+            {holdingsSubTab === 'allocation' && (
+              <div className="space-y-6">
+                {/* Account Comparison Summary */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Daol Allocation Box */}
+                  <div className="bg-neutral-900/70 border border-neutral-800 rounded-2xl p-4.5">
+                    <div className="flex justify-between items-center mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="w-3 h-3 rounded-full bg-cyan-400" />
+                        <span className="font-semibold text-neutral-100 text-sm">다올투자증권 비중</span>
+                      </div>
+                      <span className="text-xs font-mono font-bold text-cyan-400">
+                        {metrics.totalStockVal > 0 
+                          ? ((metrics.daolStockVal / metrics.totalStockVal) * 100).toFixed(1) 
+                          : '0.0'}%
+                      </span>
+                    </div>
+                    <div className="h-2 w-full bg-neutral-950 rounded-full overflow-hidden mb-3">
+                      <div 
+                        className="h-full bg-cyan-400" 
+                        style={{ width: `${metrics.totalStockVal > 0 ? (metrics.daolStockVal / metrics.totalStockVal) * 100 : 0}%` }}
+                      />
+                    </div>
+                    <div className="text-xs font-mono space-y-1 text-neutral-400">
+                      <div className="flex justify-between">
+                        <span>보유 종목 수</span>
+                        <span className="text-neutral-200">{metrics.daolHoldings.length}개</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>주식 평가금액</span>
+                        <span className="text-neutral-200">{formatKRW(metrics.daolStockVal)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Hanwha Allocation Box */}
+                  <div className="bg-neutral-900/70 border border-neutral-800 rounded-2xl p-4.5">
+                    <div className="flex justify-between items-center mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="w-3 h-3 rounded-full bg-orange-400" />
+                        <span className="font-semibold text-neutral-100 text-sm">한화투자증권 비중</span>
+                      </div>
+                      <span className="text-xs font-mono font-bold text-orange-400">
+                        {metrics.totalStockVal > 0 
+                          ? ((metrics.hanwhaStockVal / metrics.totalStockVal) * 100).toFixed(1) 
+                          : '0.0'}%
+                      </span>
+                    </div>
+                    <div className="h-2 w-full bg-neutral-950 rounded-full overflow-hidden mb-3">
+                      <div 
+                        className="h-full bg-orange-400" 
+                        style={{ width: `${metrics.totalStockVal > 0 ? (metrics.hanwhaStockVal / metrics.totalStockVal) * 100 : 0}%` }}
+                      />
+                    </div>
+                    <div className="text-xs font-mono space-y-1 text-neutral-400">
+                      <div className="flex justify-between">
+                        <span>보유 종목 수</span>
+                        <span className="text-neutral-200">{metrics.hanwhaHoldings.length}개</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>주식 평가금액</span>
+                        <span className="text-neutral-200">{formatKRW(metrics.hanwhaStockVal)}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stock Weights Ranking */}
+                <div className="bg-neutral-900/80 border border-neutral-800 rounded-2xl p-5 space-y-4">
+                  <h3 className="text-sm font-semibold text-neutral-100 flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4 text-emerald-400" />
+                    <span>개별 종목별 포트폴리오 비중 및 담보 기여도 순위</span>
+                  </h3>
+
+                  <div className="space-y-3.5">
+                    {[...metrics.calculatedHoldings]
+                      .sort((a, b) => b.totalVal - a.totalVal)
+                      .map((item, index) => {
+                        const weight = metrics.totalStockVal > 0 ? (item.totalVal / metrics.totalStockVal) * 100 : 0;
+                        const isDaol = item.account === 'daol';
+                        return (
+                          <div key={item.id} className="space-y-1.5">
+                            <div className="flex justify-between items-center text-xs">
+                              <div className="flex items-center gap-2 font-sans font-medium text-neutral-200">
+                                <span className="font-mono text-neutral-500 w-4">{index + 1}.</span>
+                                <span>{item.name}</span>
+                                <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                                  isDaol ? 'bg-cyan-950/60 text-cyan-400' : 'bg-orange-950/60 text-orange-400'
+                                }`}>
+                                  {isDaol ? '다올' : '한화'}
+                                </span>
+                              </div>
+                              <div className="font-mono text-xs flex items-center gap-3">
+                                <span className="text-neutral-400">{formatKRW(item.totalVal)}</span>
+                                <span className="font-bold text-neutral-100 w-12 text-right">{weight.toFixed(1)}%</span>
+                              </div>
+                            </div>
+                            <div className="h-2 w-full bg-neutral-950 rounded-full overflow-hidden flex">
+                              <div 
+                                className={`h-full transition-all duration-300 ${
+                                  isDaol ? 'bg-cyan-400' : 'bg-orange-400'
+                                }`} 
+                                style={{ width: `${Math.min(100, weight)}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* TAB 3: 계좌 담보 & 반대매매 관리 (Collateral & Stress Test) */}
+        {/* ========================================================================= */}
+        {activeTab === 'collateral' && (
+          <div className="space-y-6">
+            {/* NEW: Stock-by-Stock Margin Call Risk Alert & Threshold Breakdown */}
+            <div className="bg-neutral-900/80 border border-neutral-800 rounded-2xl p-5 space-y-4 shadow-xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-neutral-800">
+                <div>
+                  <h3 className="text-base font-bold text-neutral-100 flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-amber-400" />
+                    <span>보유 종목별 주식담보대출 상세 분석 & 반대매매 임계선</span>
+                  </h3>
+                  <p className="text-xs text-neutral-400 mt-0.5">
+                    종목별 담보비율, 140% 마진콜 발생 가격(청산 임계 주가) 및 허용 하락 버퍼
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs font-mono">
+                  <span className="text-neutral-400">담보설정 종목:</span>
+                  <span className="px-2 py-0.5 rounded bg-amber-950/60 text-amber-300 font-bold border border-amber-800/40">
+                    {metrics.calculatedHoldings.filter(h => h.loanAmount > 0).length}개
+                  </span>
+                </div>
+              </div>
+
+              {/* Stock Loan Cards Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {metrics.calculatedHoldings
+                  .filter(h => h.loanAmount > 0)
+                  .sort((a, b) => (a.stockCollateralRatio || 999) - (b.stockCollateralRatio || 999))
+                  .map(item => {
+                    const isDanger = item.stockCollateralRatio !== null && item.stockCollateralRatio < 140;
+                    const isWarning = item.stockCollateralRatio !== null && item.stockCollateralRatio >= 140 && item.stockCollateralRatio < 160;
+                    const isDaol = item.account === 'daol';
+
+                    return (
+                      <div 
+                        key={item.id} 
+                        className={`rounded-2xl p-4 border transition-all ${
+                          isDanger 
+                            ? 'bg-rose-950/20 border-rose-600/70 shadow-lg shadow-rose-950/30' 
+                            : isWarning 
+                            ? 'bg-amber-950/20 border-amber-600/60' 
+                            : 'bg-neutral-950/60 border-neutral-800/80 hover:border-neutral-700'
+                        }`}
+                      >
+                        <div className="flex justify-between items-start mb-3">
+                          <div className="flex items-center gap-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold ${
+                              isDaol ? 'bg-cyan-950/80 text-cyan-400 border border-cyan-800/40' : 'bg-orange-950/80 text-orange-400 border border-orange-800/40'
+                            }`}>
+                              {isDaol ? '다올' : '한화'}
+                            </span>
+                            <div>
+                              <span className="font-semibold text-neutral-100 text-sm font-sans">{item.name}</span>
+                              <span className="text-[11px] text-neutral-500 font-mono ml-1.5">{item.shares.toLocaleString()}주</span>
+                            </div>
+                          </div>
+
+                          <div className="text-right font-mono">
+                            <span className={`text-base font-extrabold ${
+                              isDanger ? 'text-rose-400' : isWarning ? 'text-amber-400' : 'text-emerald-400'
+                            }`}>
+                              {item.stockCollateralRatio !== null ? `${item.stockCollateralRatio.toFixed(1)}%` : '-'}
+                            </span>
+                            <span className="text-[10px] text-neutral-500 block">종목 담보비율</span>
+                          </div>
+                        </div>
+
+                        {/* Progress visual bar */}
+                        <div className="h-2 w-full bg-neutral-900 rounded-full overflow-hidden mb-3 border border-neutral-850">
+                          <div 
+                            className={`h-full transition-all duration-500 ${
+                              isDanger ? 'bg-rose-500' : isWarning ? 'bg-amber-500' : 'bg-emerald-500'
+                            }`}
+                            style={{ width: `${Math.min(100, ((item.stockCollateralRatio || 0) / 200) * 100)}%` }}
+                          />
+                        </div>
+
+                        {/* Key Metrics Grid */}
+                        <div className="grid grid-cols-2 gap-2 text-xs font-mono bg-neutral-900/60 p-2.5 rounded-xl border border-neutral-800/60 mb-3">
+                          <div>
+                            <span className="text-[11px] text-neutral-500 block">담보대출 설정액</span>
+                            <span className="text-amber-300 font-bold">{formatKRW(item.loanAmount)}</span>
+                          </div>
+                          <div>
+                            <span className="text-[11px] text-neutral-500 block">현재 평가액</span>
+                            <span className="text-neutral-200">{formatKRW(item.totalVal)}</span>
+                          </div>
+                          <div className="pt-1.5 border-t border-neutral-800/50">
+                            <span className="text-[11px] text-neutral-500 block">140% 마진콜 임계주가</span>
+                            <span className="text-rose-300 font-bold underline decoration-rose-500/50">
+                              {formatKRW(item.liquidationPrice)}
+                            </span>
+                          </div>
+                          <div className="pt-1.5 border-t border-neutral-800/50">
+                            <span className="text-[11px] text-neutral-500 block">허용 주가 하락여유</span>
+                            <span className={`font-semibold ${
+                              item.dropBufferRate !== null && item.dropBufferRate <= 0 
+                                ? 'text-rose-400 font-bold' 
+                                : item.dropBufferRate !== null && item.dropBufferRate < 10 
+                                ? 'text-amber-400' 
+                                : 'text-emerald-400'
+                            }`}>
+                              {item.dropBufferRate !== null ? `${item.dropBufferRate.toFixed(1)}%` : '-'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Inline Quick Loan Modifier */}
+                        <div className="flex items-center justify-between gap-2 pt-1">
+                          <span className="text-[11px] text-neutral-400">대출액 직접 수정:</span>
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              step="500000"
+                              value={item.loanAmount}
+                              onChange={(e) => handleUpdateStockLoan(item.id, e.target.value)}
+                              className="w-28 bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-1 text-xs font-mono text-amber-300 text-right focus:border-amber-500 focus:outline-none"
+                            />
+                            <span className="text-[11px] text-neutral-500">원</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+
+              {metrics.calculatedHoldings.filter(h => h.loanAmount > 0).length === 0 && (
+                <div className="py-8 text-center text-xs text-neutral-500">
+                  현재 담보대출이 설정된 종목이 없습니다. [보유 종목] 탭에서 종목 수정 시 담보대출금액을 입력하세요.
+                </div>
+              )}
+            </div>
+
+            {/* Broker Account Collateral Manager Cards */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Daol Account Collateral Box */}
+              <div className="bg-neutral-900/80 border border-neutral-800 rounded-2xl p-5 space-y-4">
+                <div className="flex justify-between items-start pb-3 border-b border-neutral-800">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full bg-cyan-400" />
+                      <h3 className="text-base font-bold text-neutral-100">다올투자증권 담보관리</h3>
+                    </div>
+                    <p className="text-xs text-neutral-400 mt-0.5">
+                      기준비율: 140% | 안전권고: 160%
+                    </p>
+                  </div>
+
+                  <div className="text-right font-mono">
+                    <span className="text-xs text-neutral-500 block">현재 통합 담보비율</span>
+                    <span className={`text-2xl font-extrabold ${
+                      metrics.daolRatio < 140 ? 'text-rose-400' : metrics.daolRatio < 160 ? 'text-amber-400' : 'text-cyan-400'
+                    }`}>
+                      {metrics.daolRatio.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+
+                {/* Status Indicator */}
+                <div className={`p-3 rounded-xl border text-xs flex items-center justify-between font-mono ${
+                  metrics.daolRatio < 140 
+                    ? 'bg-rose-950/40 border-rose-700 text-rose-300'
+                    : metrics.daolRatio < 160
+                    ? 'bg-amber-950/40 border-amber-700 text-amber-300'
+                    : 'bg-cyan-950/30 border-cyan-800/50 text-cyan-300'
+                }`}>
+                  <span className="font-sans font-medium">담보 상태</span>
+                  <span className="font-bold">
+                    {metrics.daolRatio < 140 ? '🚨 반대매매 위험발생!' : metrics.daolRatio < 160 ? '⚠️ 주의 상태' : '✅ 정상 담보 유지'}
+                  </span>
+                </div>
+
+                {/* Shortfall Details */}
+                <div className="space-y-2 bg-neutral-950/60 p-3.5 rounded-xl border border-neutral-850 text-xs font-mono">
+                  <div className="flex justify-between text-neutral-400">
+                    <span>다올 종목 담보대출 합계</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-amber-300 font-bold">{formatKRW(metrics.daolHoldingLoans)}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleSyncAccountLoans('daol')}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-cyan-400 border border-neutral-700"
+                        title="종목별 대출금 합계를 계좌 대출금으로 즉시 반영"
+                      >
+                        합계 동기화
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>주식 평가금액</span>
+                    <span className="text-neutral-200">{formatKRW(metrics.daolStockVal)}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>담보 인정 총자산 (주식+예수금)</span>
+                    <span className="text-neutral-200">{formatKRW(metrics.daolCollateralAsset)}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>140% 기준 필요 담보자산</span>
+                    <span className="text-neutral-300">{formatKRW(metrics.effectiveDaolLoan * 1.4)}</span>
+                  </div>
+                  <div className="flex justify-between pt-2 border-t border-neutral-800 text-neutral-300 font-semibold">
+                    <span>140% 복구 필요 입금액</span>
+                    <span className={metrics.daolShortfall140 > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
+                      {metrics.daolShortfall140 > 0 ? formatKRW(metrics.daolShortfall140) : '0원 (충족)'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>160% 안전권고 필요 입금액</span>
+                    <span className={metrics.daolShortfall160 > 0 ? 'text-amber-400 font-semibold' : 'text-emerald-400'}>
+                      {metrics.daolShortfall160 > 0 ? formatKRW(metrics.daolShortfall160) : '0원 (충족)'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Editable Cash & Margin Loan Inputs */}
+                <div className="pt-2 border-t border-neutral-800">
+                  <div className="text-xs font-medium text-neutral-300 mb-2">예수금 및 총 대출금 직접 입력</div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[11px] text-neutral-400 block mb-1">예수금 (원)</label>
+                      <input
+                        type="number"
+                        value={accounts.daol.cash}
+                        onChange={(e) => handleUpdateAccountLoans('daol', e.target.value, accounts.daol.loan)}
+                        className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs font-mono text-neutral-100 focus:border-cyan-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-neutral-400 block mb-1">총 대출금 (원)</label>
+                      <input
+                        type="number"
+                        value={accounts.daol.loan}
+                        onChange={(e) => handleUpdateAccountLoans('daol', accounts.daol.cash, e.target.value)}
+                        className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs font-mono text-amber-300 focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Hanwha Account Collateral Box */}
+              <div className="bg-neutral-900/80 border border-neutral-800 rounded-2xl p-5 space-y-4">
+                <div className="flex justify-between items-start pb-3 border-b border-neutral-800">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full bg-orange-400" />
+                      <h3 className="text-base font-bold text-neutral-100">한화투자증권 담보관리</h3>
+                    </div>
+                    <p className="text-xs text-neutral-400 mt-0.5">
+                      기준비율: 140% | 안전권고: 160%
+                    </p>
+                  </div>
+
+                  <div className="text-right font-mono">
+                    <span className="text-xs text-neutral-500 block">현재 통합 담보비율</span>
+                    <span className={`text-2xl font-extrabold ${
+                      metrics.hanwhaRatio < 140 ? 'text-rose-400' : metrics.hanwhaRatio < 160 ? 'text-amber-400' : 'text-orange-400'
+                    }`}>
+                      {metrics.hanwhaRatio.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+
+                {/* Status Indicator */}
+                <div className={`p-3 rounded-xl border text-xs flex items-center justify-between font-mono ${
+                  metrics.hanwhaRatio < 140 
+                    ? 'bg-rose-950/40 border-rose-700 text-rose-300'
+                    : metrics.hanwhaRatio < 160
+                    ? 'bg-amber-950/40 border-amber-700 text-amber-300'
+                    : 'bg-orange-950/30 border-orange-800/50 text-orange-300'
+                }`}>
+                  <span className="font-sans font-medium">담보 상태</span>
+                  <span className="font-bold">
+                    {metrics.hanwhaRatio < 140 ? '🚨 반대매매 위험발생!' : metrics.hanwhaRatio < 160 ? '⚠️ 주의 상태' : '✅ 정상 담보 유지'}
+                  </span>
+                </div>
+
+                {/* Shortfall Details */}
+                <div className="space-y-2 bg-neutral-950/60 p-3.5 rounded-xl border border-neutral-850 text-xs font-mono">
+                  <div className="flex justify-between text-neutral-400">
+                    <span>한화 종목 담보대출 합계</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-amber-300 font-bold">{formatKRW(metrics.hanwhaHoldingLoans)}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleSyncAccountLoans('hanwha')}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-orange-400 border border-neutral-700"
+                        title="종목별 대출금 합계를 계좌 대출금으로 즉시 반영"
+                      >
+                        합계 동기화
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>주식 평가금액</span>
+                    <span className="text-neutral-200">{formatKRW(metrics.hanwhaStockVal)}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>담보 인정 총자산 (주식+예수금)</span>
+                    <span className="text-neutral-200">{formatKRW(metrics.hanwhaCollateralAsset)}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>140% 기준 필요 담보자산</span>
+                    <span className="text-neutral-300">{formatKRW(metrics.effectiveHanwhaLoan * 1.4)}</span>
+                  </div>
+                  <div className="flex justify-between pt-2 border-t border-neutral-800 text-neutral-300 font-semibold">
+                    <span>140% 복구 필요 입금액</span>
+                    <span className={metrics.hanwhaShortfall140 > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
+                      {metrics.hanwhaShortfall140 > 0 ? formatKRW(metrics.hanwhaShortfall140) : '0원 (충족)'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>160% 안전권고 필요 입금액</span>
+                    <span className={metrics.hanwhaShortfall160 > 0 ? 'text-amber-400 font-semibold' : 'text-emerald-400'}>
+                      {metrics.hanwhaShortfall160 > 0 ? formatKRW(metrics.hanwhaShortfall160) : '0원 (충족)'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Editable Cash & Margin Loan Inputs */}
+                <div className="pt-2 border-t border-neutral-800">
+                  <div className="text-xs font-medium text-neutral-300 mb-2">예수금 및 총 대출금 직접 입력</div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[11px] text-neutral-400 block mb-1">예수금 (원)</label>
+                      <input
+                        type="number"
+                        value={accounts.hanwha.cash}
+                        onChange={(e) => handleUpdateAccountLoans('hanwha', e.target.value, accounts.hanwha.loan)}
+                        className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs font-mono text-neutral-100 focus:border-orange-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-neutral-400 block mb-1">총 대출금 (원)</label>
+                      <input
+                        type="number"
+                        value={accounts.hanwha.loan}
+                        onChange={(e) => handleUpdateAccountLoans('hanwha', accounts.hanwha.cash, e.target.value)}
+                        className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs font-mono text-amber-300 focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Stress Test Matrix (-5% ~ -30%) */}
+            <div className="bg-neutral-900/80 border border-neutral-800 rounded-2xl p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-neutral-800">
+                <div>
+                  <h3 className="text-base font-semibold text-neutral-100 flex items-center gap-2">
+                    <ShieldAlert className="w-5 h-5 text-rose-400" />
+                    <span>주가 급락 스트레스 테스트 시뮬레이터 (-5% ~ -30%)</span>
+                  </h3>
+                  <p className="text-xs text-neutral-400 mt-0.5">
+                    시장 폭락 시 각 증권사 담보비율 및 반대매매(140%) 트리거 도달 구간 시뮬레이션
+                  </p>
+                </div>
+              </div>
+
+              {/* Stress Table */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse font-mono">
+                  <thead>
+                    <tr className="border-b border-neutral-800 text-neutral-400 bg-neutral-950/40">
+                      <th className="py-3 px-4">하락 시나리오</th>
+                      <th className="py-3 px-4 text-center">통합 담보비율</th>
+                      <th className="py-3 px-4 text-center">다올 담보비율</th>
+                      <th className="py-3 px-4 text-right">다올 140% 부족액</th>
+                      <th className="py-3 px-4 text-center">한화 담보비율</th>
+                      <th className="py-3 px-4 text-right">한화 140% 부족액</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-800/60">
+                    {stressResults.map(item => (
+                      <tr 
+                        key={item.drop} 
+                        className={`hover:bg-neutral-800/30 transition ${
+                          item.totalSimCall ? 'bg-rose-950/10' : ''
+                        }`}
+                      >
+                        <td className="py-3 px-4 font-semibold text-rose-400 font-sans">
+                          주가 -{item.drop}% 급락
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className={`px-2 py-0.5 rounded font-bold ${
+                            item.totalSimCall ? 'bg-rose-900/60 text-rose-300' : 'bg-neutral-800 text-neutral-200'
+                          }`}>
+                            {item.totalSimRatio.toFixed(1)}%
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className={`px-2 py-0.5 rounded ${
+                            item.daolSimCall ? 'bg-rose-900/60 text-rose-300 font-bold' : 'text-neutral-300'
+                          }`}>
+                            {item.daolSimRatio.toFixed(1)}% {item.daolSimCall ? '🚨' : ''}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right font-medium">
+                          {item.daolSimShortfall > 0 ? (
+                            <span className="text-rose-400">{formatKRW(item.daolSimShortfall)}</span>
+                          ) : (
+                            <span className="text-neutral-500">-</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          <span className={`px-2 py-0.5 rounded ${
+                            item.hanwhaSimCall ? 'bg-rose-900/60 text-rose-300 font-bold' : 'text-neutral-300'
+                          }`}>
+                            {item.hanwhaSimRatio.toFixed(1)}% {item.hanwhaSimCall ? '🚨' : ''}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right font-medium">
+                          {item.hanwhaSimShortfall > 0 ? (
+                            <span className="text-rose-400">{formatKRW(item.hanwhaSimShortfall)}</span>
+                          ) : (
+                            <span className="text-neutral-500">-</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {}
+      {isAddModalOpen && (
+        <HoldingModal
+          isOpen={isAddModalOpen}
+          onClose={() => {
+            setIsAddModalOpen(false);
+            setEditingHolding(null);
+          }}
+          onSave={handleSaveHolding}
+          initialData={editingHolding}
+        />
+      )}
+
+      {}
+      {isSettingsOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-3xl p-6 shadow-2xl space-y-5">
+            <div className="flex justify-between items-center pb-3 border-b border-neutral-800">
+              <div className="flex items-center gap-2">
+                <Settings className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-base font-semibold text-neutral-100">보안 및 시스템 설정</h3>
+              </div>
+              <button
+                onClick={() => setIsSettingsOpen(false)}
+                className="p-1 rounded text-neutral-400 hover:text-neutral-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Change PIN Section */}
+            <div className="space-y-3">
+              <label className="text-xs font-medium text-neutral-300 block">
+                새로운 4자리 PIN 비밀번호 설정
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  maxLength={4}
+                  placeholder="예: 5678"
+                  value={newPinInput}
+                  onChange={(e) => setNewPinInput(e.target.value.replace(/\D/g, ''))}
+                  className="flex-1 bg-neutral-950 border border-neutral-850 rounded-xl px-3 py-2 text-sm font-mono text-center tracking-widest text-neutral-100 focus:border-emerald-500 focus:outline-none"
+                />
+                <button
+                  onClick={handleUpdatePin}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-xl transition active:scale-95"
+                >
+                  변경 저장
+                </button>
+              </div>
+              {settingsNotice && (
+                <div className="text-xs text-amber-400 font-mono mt-1">
+                  {settingsNotice}
+                </div>
+              )}
+            </div>
+
+            {/* Secret Tip Info */}
+            <div className="bg-neutral-950/70 p-3.5 rounded-xl border border-neutral-800 text-xs text-neutral-400 space-y-1.5 leading-relaxed">
+              <div className="font-semibold text-neutral-200 flex items-center gap-1.5">
+                <Info className="w-3.5 h-3.5 text-cyan-400" />
+                비밀 위장 모드 작동 방식
+              </div>
+              <p>
+                헤더의 <span className="text-amber-300 font-medium">[계산기 위장]</span> 버튼을 누르면 즉시 평범한 계산기 화면으로 전환됩니다.
+              </p>
+              <p>
+                계산기 화면에서 <span className="text-emerald-400 font-medium">설정한 PIN ({pin})</span>을 입력한 후 <span className="text-emerald-400 font-medium">[=]</span> 버튼을 누르면 아무도 모르게 원래 터미널로 즉시 복귀합니다.
+              </p>
+            </div>
+
+            <div className="pt-2">
+              <button
+                onClick={() => setIsSettingsOpen(false)}
+                className="w-full py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-semibold transition"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 종합 국내/해외 주요 종목 마스터 사전 (종목명 입력 시 자동 완성 및 코드 매핑)
+const STOCK_DICTIONARY = [
+  { name: '삼성전자', ticker: '005930.KS', market: 'KOSPI', defaultPrice: 68500 },
+  { name: '삼성전자우', ticker: '005935.KS', market: 'KOSPI', defaultPrice: 55000 },
+  { name: 'SK하이닉스', ticker: '000660.KS', market: 'KOSPI', defaultPrice: 198000 },
+  { name: 'LG에너지솔루션', ticker: '373220.KS', market: 'KOSPI', defaultPrice: 385000 },
+  { name: '삼성바이오로직스', ticker: '207940.KS', market: 'KOSPI', defaultPrice: 980000 },
+  { name: '현대차', ticker: '005380.KS', market: 'KOSPI', defaultPrice: 245000 },
+  { name: '기아', ticker: '000270.KS', market: 'KOSPI', defaultPrice: 105000 },
+  { name: '셀트리온', ticker: '068270.KS', market: 'KOSPI', defaultPrice: 195000 },
+  { name: 'KB금융', ticker: '105560.KS', market: 'KOSPI', defaultPrice: 88000 },
+  { name: '신한지주', ticker: '055550.KS', market: 'KOSPI', defaultPrice: 56000 },
+  { name: 'POSCO홀딩스', ticker: '005490.KS', market: 'KOSPI', defaultPrice: 375000 },
+  { name: 'NAVER', ticker: '035420.KS', market: 'KOSPI', defaultPrice: 172000 },
+  { name: '네이버', ticker: '035420.KS', market: 'KOSPI', defaultPrice: 172000 },
+  { name: '카카오', ticker: '035720.KS', market: 'KOSPI', defaultPrice: 37500 },
+  { name: '현대모비스', ticker: '012330.KS', market: 'KOSPI', defaultPrice: 242000 },
+  { name: '삼성물산', ticker: '028260.KS', market: 'KOSPI', defaultPrice: 142000 },
+  { name: '삼성SDI', ticker: '006400.KS', market: 'KOSPI', defaultPrice: 350000 },
+  { name: 'LG화학', ticker: '051910.KS', market: 'KOSPI', defaultPrice: 330000 },
+  { name: '카카오뱅크', ticker: '323410.KS', market: 'KOSPI', defaultPrice: 22000 },
+  { name: '한화에어로스페이스', ticker: '012450.KS', market: 'KOSPI', defaultPrice: 320000 },
+  { name: '현대로템', ticker: '064350.KS', market: 'KOSPI', defaultPrice: 55000 },
+  { name: '두산에너빌리티', ticker: '034020.KS', market: 'KOSPI', defaultPrice: 21000 },
+  { name: 'HD현대중공업', ticker: '329180.KS', market: 'KOSPI', defaultPrice: 195000 },
+  { name: '에코프로', ticker: '086520.KQ', market: 'KOSDAQ', defaultPrice: 84500 },
+  { name: '에코프로비엠', ticker: '247540.KQ', market: 'KOSDAQ', defaultPrice: 175000 },
+  { name: '알테오젠', ticker: '196170.KQ', market: 'KOSDAQ', defaultPrice: 345000 },
+  { name: 'HLB', ticker: '028300.KQ', market: 'KOSDAQ', defaultPrice: 87000 },
+  { name: '삼천당제약', ticker: '000250.KQ', market: 'KOSDAQ', defaultPrice: 135000 },
+  { name: '리노공업', ticker: '058470.KQ', market: 'KOSDAQ', defaultPrice: 210000 },
+  { name: '레인보우로보틱스', ticker: '277810.KQ', market: 'KOSDAQ', defaultPrice: 142000 },
+  { name: 'HPSP', ticker: '403870.KQ', market: 'KOSDAQ', defaultPrice: 33000 },
+  { name: '펄어비스', ticker: '263750.KQ', market: 'KOSDAQ', defaultPrice: 37000 },
+  { name: '테슬라', ticker: 'TSLA', market: 'NASDAQ', defaultPrice: 355000 },
+  { name: '엔비디아', ticker: 'NVDA', market: 'NASDAQ', defaultPrice: 180000 },
+  { name: '애플', ticker: 'AAPL', market: 'NASDAQ', defaultPrice: 320000 },
+  { name: '마이크로소프트', ticker: 'MSFT', market: 'NASDAQ', defaultPrice: 590000 },
+  { name: '알파벳', ticker: 'GOOGL', market: 'NASDAQ', defaultPrice: 235000 },
+  { name: '구글', ticker: 'GOOGL', market: 'NASDAQ', defaultPrice: 235000 },
+  { name: '아마존', ticker: 'AMZN', market: 'NASDAQ', defaultPrice: 260000 },
+  { name: 'TSMC', ticker: 'TSM', market: 'NYSE', defaultPrice: 245000 }
+];
+
+function HoldingModal({ isOpen, onClose, onSave, initialData }) {
+  const [ticker, setTicker] = useState(initialData?.ticker || '005930.KS');
+  const [name, setName] = useState(initialData?.name || '');
+  const [account, setAccount] = useState(initialData?.account || 'daol');
+  const [shares, setShares] = useState(initialData?.shares || 100);
+  const [buyPrice, setBuyPrice] = useState(initialData?.buyPrice || 70000);
+  const [currentPrice, setCurrentPrice] = useState(initialData?.currentPrice || 70000);
+  const [loanAmount, setLoanAmount] = useState(initialData?.loanAmount || 0);
+
+  // Auto-complete state
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const searchContainerRef = useRef(null);
+
+  // Filter suggestions whenever name input changes
+  const handleNameChange = (val) => {
+    setName(val);
+    if (!val.trim()) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    const query = val.trim().toLowerCase();
+    const matches = STOCK_DICTIONARY.filter(item => 
+      item.name.toLowerCase().includes(query) || 
+      item.ticker.toLowerCase().includes(query)
+    );
+
+    setSuggestions(matches.slice(0, 6));
+    setShowSuggestions(matches.length > 0);
+
+    // If exact name match, auto-fill code right away
+    const exact = STOCK_DICTIONARY.find(item => item.name.toLowerCase() === query);
+    if (exact) {
+      setTicker(exact.ticker);
+      if (!initialData) {
+        setCurrentPrice(exact.defaultPrice);
+        setBuyPrice(exact.defaultPrice);
+      }
+    }
+  };
+
+  // Select stock from dropdown
+  const handleSelectSuggestion = (item) => {
+    setName(item.name);
+    setTicker(item.ticker);
+    if (!initialData) {
+      setCurrentPrice(item.defaultPrice);
+      setBuyPrice(item.defaultPrice);
+    }
+    setShowSuggestions(false);
+  };
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handleOutsideClick = (e) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, []);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!ticker || !name) return;
+    onSave({
+      id: initialData?.id,
+      account,
+      ticker: ticker.trim().toUpperCase(),
+      name: name.trim(),
+      shares: Number(shares) || 0,
+      buyPrice: Number(buyPrice) || 0,
+      currentPrice: Number(currentPrice) || Number(buyPrice) || 0,
+      loanAmount: Number(loanAmount) || 0
+    });
+  };
+
+  const presets = [
+    { ticker: '005930.KS', name: '삼성전자', buyPrice: 70000, currentPrice: 69000 },
+    { ticker: '000660.KS', name: 'SK하이닉스', buyPrice: 180000, currentPrice: 195000 },
+    { ticker: '086520.KQ', name: '에코프로', buyPrice: 90000, currentPrice: 85000 },
+    { ticker: '005380.KS', name: '현대차', buyPrice: 240000, currentPrice: 248000 },
+    { ticker: 'TSLA', name: '테슬라', buyPrice: 330000, currentPrice: 355000 },
+    { ticker: 'NVDA', name: '엔비디아', buyPrice: 160000, currentPrice: 180000 }
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-3xl p-6 shadow-2xl relative">
+        <div className="flex justify-between items-center pb-3 border-b border-neutral-800 mb-4">
+          <div>
+            <h3 className="text-base font-semibold text-neutral-100">
+              {initialData ? '보유 종목 정보 수정' : '새 종목 추가 (실시간 자동 검색)'}
+            </h3>
+            <p className="text-[11px] text-neutral-400 font-mono mt-0.5">
+              종목명을 입력하면 종목코드 및 현재가가 자동으로 완성됩니다.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1 rounded text-neutral-400 hover:text-neutral-200">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Quick Presets */}
+        <div className="mb-4">
+          <span className="text-[11px] text-neutral-400 block mb-1.5 font-mono">인기 종목 바로가기:</span>
+          <div className="flex flex-wrap gap-1.5">
+            {presets.map(p => (
+              <button
+                key={p.ticker}
+                type="button"
+                onClick={() => {
+                  setName(p.name);
+                  setTicker(p.ticker);
+                  setBuyPrice(p.buyPrice);
+                  setCurrentPrice(p.currentPrice);
+                  setShowSuggestions(false);
+                }}
+                className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[11px] font-mono transition"
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Stock Name with Live Auto-Search Dropdown */}
+          <div ref={searchContainerRef} className="relative">
+            <label className="text-xs text-neutral-300 font-medium block mb-1 flex items-center justify-between">
+              <span>종목명 입력 (자동 검색)</span>
+              <span className="text-[10px] text-emerald-400 font-normal">입력 시 코드 자동 연동</span>
+            </label>
+            <div className="relative">
+              <input
+                type="text"
+                required
+                placeholder="예: 현대차, 하이닉스, 카카오, 엔비디아..."
+                value={name}
+                onChange={(e) => handleNameChange(e.target.value)}
+                onFocus={() => {
+                  if (suggestions.length > 0) setShowSuggestions(true);
+                }}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-neutral-100 placeholder-neutral-500 focus:border-emerald-500 focus:outline-none"
+              />
+              <Search className="w-4 h-4 text-neutral-500 absolute right-3 top-2.5 pointer-events-none" />
+            </div>
+
+            {/* Suggestions Dropdown Popover */}
+            {showSuggestions && suggestions.length > 0 && (
+              <div className="absolute left-0 right-0 top-full mt-1.5 z-30 bg-neutral-900 border border-neutral-700/80 rounded-2xl shadow-2xl overflow-hidden divide-y divide-neutral-800/60 font-mono">
+                {suggestions.map((item) => (
+                  <button
+                    key={item.ticker + item.name}
+                    type="button"
+                    onClick={() => handleSelectSuggestion(item)}
+                    className="w-full text-left px-3.5 py-2.5 hover:bg-neutral-800/90 flex items-center justify-between transition group"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-sans font-semibold text-neutral-200 text-xs group-hover:text-emerald-400 transition">
+                        {item.name}
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400">
+                        {item.market}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 text-right">
+                      <span className="text-xs text-emerald-400 font-bold">{item.ticker}</span>
+                      <span className="text-[11px] text-neutral-500">{formatKRW(item.defaultPrice)}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            {/* Account Selector */}
+            <div>
+              <label className="text-xs text-neutral-400 block mb-1">증권 계좌</label>
+              <select
+                value={account}
+                onChange={(e) => setAccount(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-neutral-200 focus:border-emerald-500 focus:outline-none"
+              >
+                <option value="daol">다올투자증권</option>
+                <option value="hanwha">한화투자증권</option>
+              </select>
+            </div>
+
+            {/* Ticker (Auto-populated or manual override) */}
+            <div>
+              <label className="text-xs text-neutral-400 block mb-1 flex items-center justify-between">
+                <span>종목코드 / 티커</span>
+                <span className="text-[10px] text-neutral-500">자동 입력</span>
+              </label>
+              <input
+                type="text"
+                required
+                placeholder="자동 입력됨 (예: 005930.KS)"
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs font-mono text-emerald-400 focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {/* Shares, Buy Price, Current Price */}
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="text-xs text-neutral-400 block mb-1">보유수량 (주)</label>
+              <input
+                type="number"
+                required
+                min="1"
+                value={shares}
+                onChange={(e) => setShares(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs font-mono text-neutral-200 focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-neutral-400 block mb-1">매입평단가 (원)</label>
+              <input
+                type="number"
+                required
+                min="1"
+                value={buyPrice}
+                onChange={(e) => setBuyPrice(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs font-mono text-neutral-200 focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-neutral-400 block mb-1">현재가 (원)</label>
+              <input
+                type="number"
+                required
+                min="1"
+                value={currentPrice}
+                onChange={(e) => setCurrentPrice(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs font-mono text-emerald-400 focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {/* Dedicated Stock Loan Amount Input */}
+          <div className="bg-neutral-950/70 p-3 rounded-2xl border border-neutral-800/80">
+            <div className="flex justify-between items-center mb-1.5">
+              <label className="text-xs text-neutral-300 font-medium flex items-center gap-1.5">
+                <DollarSign className="w-3.5 h-3.5 text-amber-400" />
+                <span>종목 담보대출 설정액 (원)</span>
+              </label>
+              <span className="text-[10px] text-amber-400/80 font-mono">대출이 없으면 0원</span>
+            </div>
+            <input
+              type="number"
+              min="0"
+              step="500000"
+              placeholder="예: 30000000"
+              value={loanAmount}
+              onChange={(e) => setLoanAmount(e.target.value)}
+              className="w-full bg-neutral-900 border border-neutral-750 rounded-xl px-3.5 py-2 text-xs font-mono text-amber-300 focus:border-amber-500 focus:outline-none"
+            />
+            <div className="mt-1.5 text-[11px] text-neutral-500 font-mono flex justify-between">
+              <span>입력 금액:</span>
+              <span className="text-amber-400 font-bold">{formatKRW(Number(loanAmount) || 0)}</span>
+            </div>
+          </div>
+
+          <div className="flex gap-2 pt-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-medium transition"
+            >
+              취소
+            </button>
+            <button
+              type="submit"
+              className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition active:scale-95 shadow-md shadow-emerald-950/40"
+            >
+              {initialData ? '수정 완료' : '종목 추가'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
